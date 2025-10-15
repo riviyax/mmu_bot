@@ -8,9 +8,33 @@ import P from "pino";
 import axios from "axios";
 import fs from "fs";
 import path from "path";
+import express from "express";
+import QRCode from "qrcode";
 
 const spamTracker = new Map();
 const whitelist = new Set();
+const app = express();
+let currentQR = ""; // Will store the live QR code temporarily
+
+app.get("/", (req, res) => {
+  if (!currentQR) {
+    return res.send("<h2>⏳ QR Code not available. Please wait...</h2>");
+  }
+
+  QRCode.toDataURL(currentQR, (err, url) => {
+    if (err) return res.send("❌ Error generating QR code");
+
+    res.send(`
+      <h2>📲 Scan the QR Code with WhatsApp</h2>
+      <img src="${url}" alt="WhatsApp QR Code" />
+    `);
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () =>
+  console.log(`🌐 QR Web Server running at: http://localhost:${PORT}`)
+);
 
 async function startBot() {
   try {
@@ -31,28 +55,30 @@ async function startBot() {
 
     sock.ev.on("creds.update", saveCreds);
 
-    // ── Connection updates ──
     sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
         const qrcode = (await import("qrcode-terminal")).default;
         qrcode.generate(qr, { small: true });
-        console.log("📲 Scan the QR above with WhatsApp to login.");
+        currentQR = qr; // Save to serve in web
+        console.log("📲 QR available at: http://localhost:3000");
       }
 
-      if (connection === "open") console.log("✅ WhatsApp connected!");
-      else if (connection === "close") {
+      if (connection === "open") {
+        console.log("✅ WhatsApp connected!");
+        currentQR = ""; // Clear QR after connection
+      } else if (connection === "close") {
         const reason =
           lastDisconnect?.error?.output?.statusCode ||
           lastDisconnect?.error?.message;
         console.error("⚠️ Connection closed:", reason);
         if (reason !== DisconnectReason.loggedOut) startBot();
-        else console.log("❌ Logged out. Delete ./session folder and restart.");
+        else
+          console.log("❌ Logged out. Delete ./session folder and restart.");
       }
     });
 
-    // ── Helper: send image or text ──
     const sendImageWithCaption = async (jid, caption) => {
       const imagePath = path.resolve("./images/main.png");
       if (!fs.existsSync(imagePath)) {
@@ -65,7 +91,6 @@ async function startBot() {
       });
     };
 
-    // ── Spam protection ──
     const checkSpam = async (jid, command) => {
       const now = Date.now();
       const userData = spamTracker.get(jid) || {};
@@ -93,7 +118,6 @@ async function startBot() {
       return false;
     };
 
-    // ── Fetch members ──
     const getMembers = async () => {
       try {
         const res = await axios.get("https://marks.vercel.app/api/members");
@@ -109,7 +133,6 @@ async function startBot() {
       }
     };
 
-    // ── Handle incoming messages ──
     sock.ev.on("messages.upsert", async (m) => {
       try {
         const msg = m.messages[0];
@@ -128,7 +151,6 @@ async function startBot() {
 
         if (await checkSpam(sender, command)) return;
 
-        // ── Wishlist add/remove ──
         if (command === "!wishlist") {
           const action = args[1]?.toLowerCase();
           if (action === "remove") {
@@ -161,7 +183,6 @@ async function startBot() {
           return;
         }
 
-        // ── !rules ──
         if (command === "!rules") {
           const lang = args[1]?.toLowerCase() || "english";
           const rules =
@@ -172,7 +193,6 @@ async function startBot() {
           return;
         }
 
-        // ── !markslist ──
         if (command === "!markslist") {
           const members = await getMembers();
           if (members.length === 0) {
@@ -196,7 +216,6 @@ ${listText}
           return;
         }
 
-        // ── !marks <name> ──
         if (command === "!marks") {
           if (!sender.endsWith("@s.whatsapp.net")) {
             await sendImageWithCaption(
@@ -245,7 +264,6 @@ ${listText}
           return;
         }
 
-        // ── !help / !about / !commands ──
         if (["!help", "!about", "!commands"].includes(command)) {
           const helpText = `╭───────────────🤖───────────────╮
 │ *MMU Marks Bot* │
