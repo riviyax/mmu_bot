@@ -6,23 +6,22 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import P from "pino";
 import axios from "axios";
-import readline from "readline";
 import fs from "fs";
 import path from "path";
 
-const spamTracker = new Map(); // { jid: { command: [timestamps] } }
-const whitelist = new Set(); // Users exempted from hard spam block
+const spamTracker = new Map();
+const whitelist = new Set();
 
 async function startBot() {
   try {
     console.log("🚀 Starting bot...");
+
     const { state, saveCreds } = await useMultiFileAuthState("./session");
     const { version } = await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
       version,
       logger: P({ level: "silent" }),
-      printQRInTerminal: false,
       auth: {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, P({ level: "silent" })),
@@ -32,47 +31,28 @@ async function startBot() {
 
     sock.ev.on("creds.update", saveCreds);
 
-    // ── Pairing Code Section ──
-    if (!sock.authState.creds.registered) {
-      const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-      });
-
-      rl.question(
-        "📱 Enter your phone number with country code (e.g., 9477XXXXXXX): ",
-        async (phoneNumber) => {
-          try {
-            const code = await sock.requestPairingCode(phoneNumber);
-            console.log("\n🔗 WhatsApp Pairing Code:");
-            console.log("====================================");
-            console.log(`📲  ${code}`);
-            console.log("====================================");
-            console.log("\n➡️ Open WhatsApp → Linked Devices → Link with phone number");
-            rl.close();
-          } catch (err) {
-            console.error("❌ Pairing code error:", err);
-            rl.close();
-          }
-        }
-      );
-    }
-
     // ── Connection updates ──
     sock.ev.on("connection.update", async (update) => {
-      const { connection, lastDisconnect } = update;
-      if (connection === "open") console.log("✅ WhatsApp connected successfully!");
+      const { connection, lastDisconnect, qr } = update;
+
+      if (qr) {
+        const qrcode = (await import("qrcode-terminal")).default;
+        qrcode.generate(qr, { small: true });
+        console.log("📲 Scan the QR above with WhatsApp to login.");
+      }
+
+      if (connection === "open") console.log("✅ WhatsApp connected!");
       else if (connection === "close") {
         const reason =
           lastDisconnect?.error?.output?.statusCode ||
           lastDisconnect?.error?.message;
-        console.error("⚠️ Connection closed due to:", reason);
+        console.error("⚠️ Connection closed:", reason);
         if (reason !== DisconnectReason.loggedOut) startBot();
         else console.log("❌ Logged out. Delete ./session folder and restart.");
       }
     });
 
-    // ── Helper: Send image or fallback text ──
+    // ── Helper: send image or text ──
     const sendImageWithCaption = async (jid, caption) => {
       const imagePath = path.resolve("./images/main.png");
       if (!fs.existsSync(imagePath)) {
@@ -90,32 +70,27 @@ async function startBot() {
       const now = Date.now();
       const userData = spamTracker.get(jid) || {};
       const timestamps = userData[command] || [];
-
-      // keep last 1 min timestamps
       const recent = timestamps.filter((t) => now - t < 60000);
       recent.push(now);
-
       userData[command] = recent;
       spamTracker.set(jid, userData);
 
       if (!whitelist.has(jid) && recent.length >= 4) {
-        // normal users: block
         await sock.sendMessage(jid, {
           text: "⚠️ You are sending too many commands. Temporarily blocked.",
         });
         console.log(`🚫 ${jid} blocked for spam`);
-        return true; // block
+        return true;
       }
 
       if (whitelist.has(jid) && recent.length >= 4) {
-        // wishlisted users: friendly warning
         await sock.sendMessage(jid, {
           text: "⚠️ You are sending the same command repeatedly. Please avoid spamming.",
         });
-        return false; // allow
+        return false;
       }
 
-      return false; // allow
+      return false;
     };
 
     // ── Fetch members ──
@@ -142,32 +117,45 @@ async function startBot() {
 
         const sender = msg.key.remoteJid;
         const body =
-          msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+          msg.message.conversation ||
+          msg.message.extendedTextMessage?.text ||
+          "";
 
         if (!body.startsWith("!")) return;
 
         const args = body.trim().split(" ");
         const command = args[0].toLowerCase();
 
-        // Spam check
         if (await checkSpam(sender, command)) return;
 
-        // ── !wishlist add/remove ──
+        // ── Wishlist add/remove ──
         if (command === "!wishlist") {
           const action = args[1]?.toLowerCase();
           if (action === "remove") {
             if (whitelist.has(sender)) {
               whitelist.delete(sender);
-              await sendImageWithCaption(sender, "✅ Removed from wishlist. Spam enabled.");
+              await sendImageWithCaption(
+                sender,
+                "✅ Removed from wishlist. Spam enabled."
+              );
             } else {
-              await sendImageWithCaption(sender, "⚠️ You are not in the wishlist.");
+              await sendImageWithCaption(
+                sender,
+                "⚠️ You are not in the wishlist."
+              );
             }
           } else {
             if (!whitelist.has(sender)) {
               whitelist.add(sender);
-              await sendImageWithCaption(sender, "✅ Added to wishlist. Spam disabled.");
+              await sendImageWithCaption(
+                sender,
+                "✅ Added to wishlist. Spam disabled."
+              );
             } else {
-              await sendImageWithCaption(sender, "⚠️ You are already in the wishlist.");
+              await sendImageWithCaption(
+                sender,
+                "⚠️ You are already in the wishlist."
+              );
             }
           }
           return;
@@ -194,7 +182,9 @@ async function startBot() {
           const listText = members
             .map(
               (m, i) =>
-                `*${i + 1}. ${m.name}*\n│ *Rank:* ${m.rank}\n│ *Marks:* ${m.marks}\n╰──────────────────────`
+                `*${i + 1}. ${m.name}*\n│ *Rank:* ${m.rank}\n│ *Marks:* ${
+                  m.marks
+                }\n╰──────────────────────`
             )
             .join("\n");
           const message = `╭───────────────📘───────────────╮
@@ -209,16 +199,24 @@ ${listText}
         // ── !marks <name> ──
         if (command === "!marks") {
           if (!sender.endsWith("@s.whatsapp.net")) {
-            await sendImageWithCaption(sender, "❌ This command works in private chat only.");
+            await sendImageWithCaption(
+              sender,
+              "❌ This command works in private chat only."
+            );
             return;
           }
           const name = args.slice(1).join(" ").trim().toLowerCase();
           if (!name) {
-            await sendImageWithCaption(sender, "⚠️ Please provide a name. Example: !marks John Doe");
+            await sendImageWithCaption(
+              sender,
+              "⚠️ Please provide a name. Example: !marks John Doe"
+            );
             return;
           }
           const members = await getMembers();
-          const found = members.find((m) => m.name.toLowerCase().includes(name));
+          const found = members.find((m) =>
+            m.name.toLowerCase().includes(name)
+          );
           if (!found) {
             const suggestions = members
               .filter((m) => m.name.toLowerCase().includes(name.slice(0, 3)))

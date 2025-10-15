@@ -10,8 +10,8 @@ import readline from "readline";
 import fs from "fs";
 import path from "path";
 
-const spamTracker = new Map(); // Track messages per user
-const whitelist = new Set(); // Users exempted from spam protection
+const spamTracker = new Map(); // { jid: { command: [timestamps] } }
+const whitelist = new Set(); // Users exempted from hard spam block
 
 async function startBot() {
   try {
@@ -86,23 +86,36 @@ async function startBot() {
     };
 
     // ── Spam protection ──
-    const checkSpam = async (jid) => {
-      if (whitelist.has(jid)) return false; // skip whitelist
-
+    const checkSpam = async (jid, command) => {
       const now = Date.now();
-      const timestamps = spamTracker.get(jid) || [];
-      const recent = timestamps.filter((t) => now - t < 60000); // 1 min
-      recent.push(now);
-      spamTracker.set(jid, recent);
+      const userData = spamTracker.get(jid) || {};
+      const timestamps = userData[command] || [];
 
-      if (recent.length >= 4) {
+      // keep last 1 min timestamps
+      const recent = timestamps.filter((t) => now - t < 60000);
+      recent.push(now);
+
+      userData[command] = recent;
+      spamTracker.set(jid, userData);
+
+      if (!whitelist.has(jid) && recent.length >= 4) {
+        // normal users: block
         await sock.sendMessage(jid, {
           text: "⚠️ You are sending too many commands. Temporarily blocked.",
         });
         console.log(`🚫 ${jid} blocked for spam`);
-        return true;
+        return true; // block
       }
-      return false;
+
+      if (whitelist.has(jid) && recent.length >= 4) {
+        // wishlisted users: friendly warning
+        await sock.sendMessage(jid, {
+          text: "⚠️ You are sending the same command repeatedly. Please avoid spamming.",
+        });
+        return false; // allow
+      }
+
+      return false; // allow
     };
 
     // ── Fetch members ──
@@ -137,7 +150,7 @@ async function startBot() {
         const command = args[0].toLowerCase();
 
         // Spam check
-        if (await checkSpam(sender)) return;
+        if (await checkSpam(sender, command)) return;
 
         // ── !wishlist add/remove ──
         if (command === "!wishlist") {
